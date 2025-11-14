@@ -9,8 +9,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table, Wrap},
     Frame, Terminal,
 };
 use rusqlite::{params, Connection};
@@ -56,11 +55,36 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT exercise_type, count, timestamp FROM workouts 
              WHERE date(timestamp) = date(?1) 
-             ORDER BY timestamp DESC",
+             ORDER BY timestamp ASC",
         )?;
         
         let records = stmt
             .query_map([today], |row| {
+                Ok(WorkoutRecord {
+                    exercise_type: row.get(0)?,
+                    count: row.get(1)?,
+                    timestamp: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        
+        Ok(records)
+    }
+
+    fn get_yesterday_workouts(&self) -> Result<Vec<WorkoutRecord>> {
+        let yesterday = Local::now()
+            .checked_sub_signed(chrono::Duration::days(1))
+            .unwrap()
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut stmt = self.conn.prepare(
+            "SELECT exercise_type, count, timestamp FROM workouts 
+             WHERE date(timestamp) = date(?1) 
+             ORDER BY timestamp ASC",
+        )?;
+        
+        let records = stmt
+            .query_map([yesterday], |row| {
                 Ok(WorkoutRecord {
                     exercise_type: row.get(0)?,
                     count: row.get(1)?,
@@ -258,7 +282,7 @@ fn ui(f: &mut Frame, app: &App) {
 fn render_main_screen(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(area);
 
     // Title
@@ -267,51 +291,159 @@ fn render_main_screen(f: &mut Frame, area: Rect, app: &App) {
         .block(Block::default().borders(Borders::ALL).title("Welcome"));
     f.render_widget(title, chunks[0]);
 
-    // Today's summary
-    if let Ok(workouts) = app.db.get_today_workouts() {
-        let mut squats_total = 0;
-        let mut pushups_total = 0;
+    // Workout summary table
+    let today_workouts = app.db.get_today_workouts().unwrap_or_default();
+    let yesterday_workouts = app.db.get_yesterday_workouts().unwrap_or_default();
+    
+    // Organize workouts by exercise type
+    let mut today_squats = Vec::new();
+    let mut today_pushups = Vec::new();
+    let mut yesterday_squats = Vec::new();
+    let mut yesterday_pushups = Vec::new();
 
-        for workout in &workouts {
-            match workout.exercise_type.as_str() {
-                "squats" => squats_total += workout.count,
-                "push-ups" => pushups_total += workout.count,
-                _ => {}
-            }
+    for workout in &today_workouts {
+        match workout.exercise_type.as_str() {
+            "squats" => today_squats.push(workout.count),
+            "push-ups" => today_pushups.push(workout.count),
+            _ => {}
         }
+    }
 
-        let summary = vec![
-            Line::from(vec![
-                Span::styled("Today's Stats:", Style::default().add_modifier(Modifier::BOLD)),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::raw("Squats: "),
-                Span::styled(
-                    squats_total.to_string(),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("Push-ups: "),
-                Span::styled(
-                    pushups_total.to_string(),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled(
-                    format!("Total workouts: {}", workouts.len()),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]),
-        ];
+    for workout in &yesterday_workouts {
+        match workout.exercise_type.as_str() {
+            "squats" => yesterday_squats.push(workout.count),
+            "push-ups" => yesterday_pushups.push(workout.count),
+            _ => {}
+        }
+    }
 
-        let summary_widget = Paragraph::new(summary)
-            .block(Block::default().borders(Borders::ALL).title("Today"))
+    // Build table rows
+    let mut table_rows = Vec::new();
+
+    // Calculate max number of columns needed first
+    let max_workouts = [
+        today_squats.len(),
+        today_pushups.len(),
+        yesterday_squats.len(),
+        yesterday_pushups.len(),
+    ].iter().max().copied().unwrap_or(0);
+
+    // Squats today
+    if !today_squats.is_empty() {
+        let sum: i32 = today_squats.iter().sum();
+        let mut cells = vec!["Squats Today".to_string()];
+        for count in &today_squats {
+            cells.push(count.to_string());
+        }
+        // Pad with empty cells if needed
+        for _ in today_squats.len()..max_workouts {
+            cells.push("".to_string());
+        }
+        cells.push(sum.to_string());
+        
+        let table_row = Row::new(cells)
+            .style(Style::default().fg(Color::Green))
+            .height(1);
+        table_rows.push(table_row);
+    }
+
+    // Squats yesterday
+    if !yesterday_squats.is_empty() {
+        let sum: i32 = yesterday_squats.iter().sum();
+        let mut cells = vec!["Squats Yesterday".to_string()];
+        for count in &yesterday_squats {
+            cells.push(count.to_string());
+        }
+        // Pad with empty cells if needed
+        for _ in yesterday_squats.len()..max_workouts {
+            cells.push("".to_string());
+        }
+        cells.push(sum.to_string());
+        
+        let table_row = Row::new(cells)
+            .style(Style::default().fg(Color::DarkGray))
+            .height(1);
+        table_rows.push(table_row);
+    }
+
+    // Push-ups today
+    if !today_pushups.is_empty() {
+        let sum: i32 = today_pushups.iter().sum();
+        let mut cells = vec!["Push-ups Today".to_string()];
+        for count in &today_pushups {
+            cells.push(count.to_string());
+        }
+        // Pad with empty cells if needed
+        for _ in today_pushups.len()..max_workouts {
+            cells.push("".to_string());
+        }
+        cells.push(sum.to_string());
+        
+        let table_row = Row::new(cells)
+            .style(Style::default().fg(Color::Green))
+            .height(1);
+        table_rows.push(table_row);
+    }
+
+    // Push-ups yesterday
+    if !yesterday_pushups.is_empty() {
+        let sum: i32 = yesterday_pushups.iter().sum();
+        let mut cells = vec!["Push-ups Yesterday".to_string()];
+        for count in &yesterday_pushups {
+            cells.push(count.to_string());
+        }
+        // Pad with empty cells if needed
+        for _ in yesterday_pushups.len()..max_workouts {
+            cells.push("".to_string());
+        }
+        cells.push(sum.to_string());
+        
+        let table_row = Row::new(cells)
+            .style(Style::default().fg(Color::DarkGray))
+            .height(1);
+        table_rows.push(table_row);
+    }
+
+    // If no workouts, show a message
+    if table_rows.is_empty() {
+        let empty_msg = Paragraph::new("No workouts yet! Press 'a' to add your first workout.")
+            .style(Style::default().fg(Color::Yellow))
+            .block(Block::default().borders(Borders::ALL).title("Workout Summary"))
             .wrap(Wrap { trim: true });
-        f.render_widget(summary_widget, chunks[1]);
+        f.render_widget(empty_msg, chunks[1]);
+    } else {
+        // Calculate max number of columns needed
+        let max_workouts = [
+            today_squats.len(),
+            today_pushups.len(),
+            yesterday_squats.len(),
+            yesterday_pushups.len(),
+        ].iter().max().copied().unwrap_or(0);
+
+        // Create column constraints: Exercise name + workout counts + total
+        let mut constraints = vec![Constraint::Percentage(30)]; // Exercise name column
+        for _ in 0..max_workouts {
+            constraints.push(Constraint::Percentage(70 / (max_workouts + 1) as u16));
+        }
+        constraints.push(Constraint::Percentage(70 / (max_workouts + 1) as u16)); // Total column
+
+        // Build header dynamically
+        let mut header_cells = vec!["Exercise".to_string()];
+        for i in 1..=max_workouts {
+            header_cells.push(format!("#{}", i));
+        }
+        header_cells.push("Total".to_string());
+
+        let workout_table = Table::new(table_rows, constraints)
+            .block(Block::default().borders(Borders::ALL).title("Workout Summary"))
+            .header(
+                Row::new(header_cells)
+                    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                    .height(1)
+            )
+            .column_spacing(1);
+
+        f.render_widget(workout_table, chunks[1]);
     }
 }
 
