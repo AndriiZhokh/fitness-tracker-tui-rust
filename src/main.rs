@@ -71,36 +71,29 @@ impl Database {
         Ok(records)
     }
 
-    fn get_yesterday_workouts(&self) -> Result<Vec<WorkoutRecord>> {
-        let yesterday = Local::now()
-            .checked_sub_signed(chrono::Duration::days(1))
-            .unwrap()
-            .format("%Y-%m-%d")
-            .to_string();
+    fn get_last_workout_date(&self) -> Result<Option<String>> {
+        let today = Local::now().format("%Y-%m-%d").to_string();
         let mut stmt = self.conn.prepare(
-            "SELECT exercise_type, count, timestamp FROM workouts 
-             WHERE date(timestamp) = date(?1) 
-             ORDER BY timestamp ASC",
+            "SELECT DISTINCT date(timestamp) as workout_date 
+             FROM workouts 
+             WHERE date(timestamp) < date(?1)
+             ORDER BY workout_date DESC
+             LIMIT 1",
         )?;
         
-        let records = stmt
-            .query_map([yesterday], |row| {
-                Ok(WorkoutRecord {
-                    exercise_type: row.get(0)?,
-                    count: row.get(1)?,
-                    timestamp: row.get(2)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        
-        Ok(records)
+        let mut rows = stmt.query([today])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
     }
 
     fn get_workouts_by_date(&self, date: &str) -> Result<Vec<WorkoutRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT exercise_type, count, timestamp FROM workouts 
              WHERE date(timestamp) = date(?1) 
-             ORDER BY timestamp DESC",
+             ORDER BY timestamp ASC",
         )?;
         
         let records = stmt
@@ -293,13 +286,20 @@ fn render_main_screen(f: &mut Frame, area: Rect, app: &App) {
 
     // Workout summary table
     let today_workouts = app.db.get_today_workouts().unwrap_or_default();
-    let yesterday_workouts = app.db.get_yesterday_workouts().unwrap_or_default();
+    
+    // Get last workout date and its workouts
+    let last_date = app.db.get_last_workout_date().unwrap_or(None);
+    let last_workouts = if let Some(ref date) = last_date {
+        app.db.get_workouts_by_date(date).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     
     // Organize workouts by exercise type
     let mut today_squats = Vec::new();
     let mut today_pushups = Vec::new();
-    let mut yesterday_squats = Vec::new();
-    let mut yesterday_pushups = Vec::new();
+    let mut last_squats = Vec::new();
+    let mut last_pushups = Vec::new();
 
     for workout in &today_workouts {
         match workout.exercise_type.as_str() {
@@ -309,10 +309,10 @@ fn render_main_screen(f: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    for workout in &yesterday_workouts {
+    for workout in &last_workouts {
         match workout.exercise_type.as_str() {
-            "squats" => yesterday_squats.push(workout.count),
-            "push-ups" => yesterday_pushups.push(workout.count),
+            "squats" => last_squats.push(workout.count),
+            "push-ups" => last_pushups.push(workout.count),
             _ => {}
         }
     }
@@ -324,8 +324,8 @@ fn render_main_screen(f: &mut Frame, area: Rect, app: &App) {
     let max_workouts = [
         today_squats.len(),
         today_pushups.len(),
-        yesterday_squats.len(),
-        yesterday_pushups.len(),
+        last_squats.len(),
+        last_pushups.len(),
     ].iter().max().copied().unwrap_or(0);
 
     // Squats today
@@ -347,15 +347,20 @@ fn render_main_screen(f: &mut Frame, area: Rect, app: &App) {
         table_rows.push(table_row);
     }
 
-    // Squats yesterday
-    if !yesterday_squats.is_empty() {
-        let sum: i32 = yesterday_squats.iter().sum();
-        let mut cells = vec!["Squats Yesterday".to_string()];
-        for count in &yesterday_squats {
+    // Squats last workout
+    if !last_squats.is_empty() {
+        let sum: i32 = last_squats.iter().sum();
+        let label = if let Some(ref date) = last_date {
+            format!("Squats ({})", date)
+        } else {
+            "Squats Last".to_string()
+        };
+        let mut cells = vec![label];
+        for count in &last_squats {
             cells.push(count.to_string());
         }
         // Pad with empty cells if needed
-        for _ in yesterday_squats.len()..max_workouts {
+        for _ in last_squats.len()..max_workouts {
             cells.push("".to_string());
         }
         cells.push(sum.to_string());
@@ -385,15 +390,20 @@ fn render_main_screen(f: &mut Frame, area: Rect, app: &App) {
         table_rows.push(table_row);
     }
 
-    // Push-ups yesterday
-    if !yesterday_pushups.is_empty() {
-        let sum: i32 = yesterday_pushups.iter().sum();
-        let mut cells = vec!["Push-ups Yesterday".to_string()];
-        for count in &yesterday_pushups {
+    // Push-ups last workout
+    if !last_pushups.is_empty() {
+        let sum: i32 = last_pushups.iter().sum();
+        let label = if let Some(ref date) = last_date {
+            format!("Push-ups ({})", date)
+        } else {
+            "Push-ups Last".to_string()
+        };
+        let mut cells = vec![label];
+        for count in &last_pushups {
             cells.push(count.to_string());
         }
         // Pad with empty cells if needed
-        for _ in yesterday_pushups.len()..max_workouts {
+        for _ in last_pushups.len()..max_workouts {
             cells.push("".to_string());
         }
         cells.push(sum.to_string());
@@ -412,14 +422,6 @@ fn render_main_screen(f: &mut Frame, area: Rect, app: &App) {
             .wrap(Wrap { trim: true });
         f.render_widget(empty_msg, chunks[1]);
     } else {
-        // Calculate max number of columns needed
-        let max_workouts = [
-            today_squats.len(),
-            today_pushups.len(),
-            yesterday_squats.len(),
-            yesterday_pushups.len(),
-        ].iter().max().copied().unwrap_or(0);
-
         // Create column constraints: Exercise name + workout counts + total
         let mut constraints = vec![Constraint::Percentage(30)]; // Exercise name column
         for _ in 0..max_workouts {
