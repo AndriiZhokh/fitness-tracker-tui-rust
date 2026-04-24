@@ -53,11 +53,11 @@ impl Database {
     fn get_today_workouts(&self) -> Result<Vec<WorkoutRecord>> {
         let today = Local::now().format("%Y-%m-%d").to_string();
         let mut stmt = self.conn.prepare(
-            "SELECT exercise_type, count, timestamp FROM workouts 
-             WHERE date(timestamp) = date(?1) 
+            "SELECT exercise_type, count, timestamp FROM workouts
+             WHERE substr(timestamp, 1, 10) = ?1
              ORDER BY timestamp ASC",
         )?;
-        
+
         let records = stmt
             .query_map([today], |row| {
                 Ok(WorkoutRecord {
@@ -74,9 +74,9 @@ impl Database {
     fn get_last_workout_date(&self) -> Result<Option<String>> {
         let today = Local::now().format("%Y-%m-%d").to_string();
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT date(timestamp) as workout_date 
-             FROM workouts 
-             WHERE date(timestamp) < date(?1)
+            "SELECT DISTINCT substr(timestamp, 1, 10) as workout_date
+             FROM workouts
+             WHERE substr(timestamp, 1, 10) < ?1
              ORDER BY workout_date DESC
              LIMIT 1",
         )?;
@@ -91,11 +91,11 @@ impl Database {
 
     fn get_workouts_by_date(&self, date: &str) -> Result<Vec<WorkoutRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT exercise_type, count, timestamp FROM workouts 
-             WHERE date(timestamp) = date(?1) 
+            "SELECT exercise_type, count, timestamp FROM workouts
+             WHERE substr(timestamp, 1, 10) = ?1
              ORDER BY timestamp ASC",
         )?;
-        
+
         let records = stmt
             .query_map([date], |row| {
                 Ok(WorkoutRecord {
